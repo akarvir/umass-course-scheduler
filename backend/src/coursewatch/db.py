@@ -27,5 +27,7 @@ def init_db():
 
 
 if __name__ == "__main__":
-    init_db()
+    from coursewatch.db import init_db as initialize
+
+    initialize()
     print("Database initialized")
