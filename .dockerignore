@@ -1,0 +1,12 @@
+.git
+.env
+.env.production
+.local
+.venv
+.qmd
+**/__pycache__
+**/.pytest_cache
+**/.ruff_cache
+web
+PROJECT.MD
+DEMO.md
