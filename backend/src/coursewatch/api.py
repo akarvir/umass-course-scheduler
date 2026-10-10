@@ -83,6 +83,9 @@ def request_code(data: EmailInput, request: Request, db: DB):
     db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:email))"), {"email": email})
     hour_ago = now() - timedelta(hours=1)
     client_hash = digest(request.client.host if request.client else "unknown")
+    db.execute(
+        text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": "login-client:" + client_hash}
+    )
     count = db.scalar(
         select(func.count())
         .select_from(LoginCode)
@@ -110,6 +113,12 @@ def request_code(data: EmailInput, request: Request, db: DB):
         raise HTTPException(429, "Please wait before requesting another code")
     for old in db.scalars(select(LoginCode).where(LoginCode.email == email, ~LoginCode.used)):
         old.used = True
+    for pending in db.scalars(
+        select(Delivery).where(
+            Delivery.recipient == email, Delivery.watch_id.is_(None), Delivery.sent_at.is_(None)
+        )
+    ):
+        db.delete(pending)
     code = f"{secrets.randbelow(1_000_000):06d}"
     db.add(
         LoginCode(
