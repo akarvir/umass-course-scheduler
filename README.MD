@@ -105,3 +105,28 @@ docker compose --env-file .env.production -f compose.production.yaml exec -T db 
 ```
 
 The production Compose configuration has been validated. Container image builds and deployment on the VM have not been performed. The collector has passed a live Fall 2026 check; sustained operation and Spring 2027 behavior after publication still need observation. Telegram delivery is deferred.
+
+### Existing Nginx droplet
+
+The inspected droplet at `165.227.126.242` has **1 GB RAM**, runs existing applications behind Nginx, and now has 2 GB swap. Use `compose.vm.yaml` with the production file to disable the Caddy service, publish only localhost ports `3010` (web) and `8010` (API), limit memory, and rotate container logs. Existing Nginx sites remain separate.
+
+Build images on GitHub's runner rather than on this small server:
+
+```sh
+gh workflow run images.yml --ref main
+# Once that run completes, download its private coursewatch-images artifact.
+gh run download RUN_ID --name coursewatch-images --dir .local/deployment-images
+cd .local/deployment-images
+shasum -a 256 -c images.sha256
+```
+
+The artifact contains the Linux images and `revision.txt`. Transfer the files to the VM, verify `images.sha256` there, and load `images.tar.gz` with `docker load`. Set `COURSEWATCH_VERSION` in the server's `.env.production` to the revision from the artifact, then:
+
+```sh
+cd /opt/coursewatch/app
+docker compose --env-file .env.production -p coursewatch -f compose.production.yaml -f compose.vm.yaml up -d --no-build db migrate api worker web
+```
+
+The app/database secrets are generated locally and kept in ignored `.env.production` with mode 600; the server copy uses the same permissions. Set the real domain, email sender, and provider key before enabling public access. Render `deploy/nginx.conf.template` for the chosen host into a new Nginx site, add a publicly trusted TLS certificate, validate with `nginx -t`, and reload Nginx. The configuration template starts with HTTP for certificate bootstrap; production needs HTTPS because sessions use Secure cookies.
+
+The Linux images have been successfully built in GitHub Actions. Public DNS, HTTPS, and real email delivery require the user's chosen domain and email-provider credentials.
