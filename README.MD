@@ -129,7 +129,7 @@ docker compose --env-file .env.production -p coursewatch -f compose.production.y
 
 The app/database secrets are generated locally and kept in ignored `.env.production` with mode 600; the server copy uses the same permissions. Set the real domain, email sender, and provider key before enabling public access. Render `deploy/nginx.conf.template` for the chosen host into a new Nginx site, add a publicly trusted TLS certificate, validate with `nginx -t`, and reload Nginx. The configuration template starts with HTTP for certificate bootstrap; production needs HTTPS because sessions use Secure cookies.
 
-The Linux images have been successfully built in GitHub Actions. Public DNS, HTTPS, and real email delivery require the user's chosen domain and email-provider credentials.
+The Linux images have been successfully built in GitHub Actions. Public DNS, HTTPS, and real email delivery have been configured and verified.
 
 ### Current deployment
 
@@ -137,4 +137,6 @@ The app is served at https://coursewatch.akarvirwebprojects.app with a publicly 
 
 The VM has daily database backups under `/opt/coursewatch/backups` and a daily certificate-renewal job. `scripts/backup-db.sh` and `scripts/renew-tls.sh` contain the commands. VM-local backups should also be copied off the server.
 
-Real email delivery requires Resend verification of `coursewatch.akarvirwebprojects.app`, with sender `alerts@coursewatch.akarvirwebprojects.app`. The runtime key is sending-only. Domain creation/verification can be done in the Resend dashboard or with a separate temporary setup key kept locally; setup keys and DNS credentials are excluded from the server's runtime configuration. Existing root-domain MX/SPF records are separate from these subdomain records.
+Resend has verified `coursewatch.akarvirwebprojects.app`, with sender `alerts@coursewatch.akarvirwebprojects.app`. All four provider DNS records are configured without changing existing records. The runtime key is sending-only. Domain creation/verification can be done in the Resend dashboard or with a separate temporary setup key kept locally; setup keys and DNS credentials are excluded from the server's runtime configuration. Existing root-domain MX/SPF records are separate from these subdomain records.
+
+Production acceptance checks passed: a verification email was delivered to the recipient mail server, the code established a Secure/HttpOnly session over HTTPS, a temporary Spring 2027 COMPSCI 220 watch reported the unpublished term, the watch was removed, and logout revoked the test session. Certificate renewal also passed a dry run. Production uses the sending-only email key; the temporary Cloudflare and Resend setup keys are no longer required for operation.
