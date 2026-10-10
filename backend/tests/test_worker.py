@@ -174,3 +174,52 @@ def test_worker_only_queries_shared_course_once(db_engine, monkeypatch):
     monkeypatch.setattr(worker.SpireClient, "collect", collect)
     worker.run_cycle()
     assert len(calls) == 1
+
+
+def test_worker_term_unpublished_is_shared_and_unknown(db_engine, monkeypatch):
+    import coursewatch.worker as worker
+    from coursewatch.spire import TermUnavailable
+    from sqlalchemy.orm import Session
+
+    with Session(db_engine) as db:
+        first, watch = setup_watch(db)
+        second = Course(catalog_number="250")
+        db.add(second)
+        db.flush()
+        db.add(Watch(user_id=watch.user_id, course_id=second.id))
+        db.commit()
+    calls = []
+
+    def unavailable(*args):
+        calls.append(args)
+        raise TermUnavailable("Spring is not published")
+
+    monkeypatch.setattr(worker, "engine", lambda: db_engine)
+    monkeypatch.setattr(worker.SpireClient, "collect", unavailable)
+    worker.run_cycle()
+    assert len(calls) == 1
+    with Session(db_engine) as db:
+        courses = db.scalars(select(Course)).all()
+        assert all(c.state == "term_unpublished" and c.snapshot is None for c in courses)
+        assert all(c.next_check_at > now() + timedelta(minutes=50) for c in courses)
+
+
+def test_polling_lock_blocks_second_worker(db_engine, monkeypatch):
+    import coursewatch.worker as worker
+    from sqlalchemy import text
+    from sqlalchemy.orm import Session
+
+    with Session(db_engine) as db:
+        setup_watch(db)
+    monkeypatch.setattr(worker, "engine", lambda: db_engine)
+    calls = []
+    monkeypatch.setattr(worker.SpireClient, "collect", lambda *args: calls.append(args))
+    with db_engine.connect() as owner:
+        owner.execute(text("SELECT pg_advisory_lock(:key)"), {"key": worker.WORKER_LOCK})
+        owner.commit()
+        try:
+            worker.run_cycle()
+            assert calls == []
+        finally:
+            owner.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": worker.WORKER_LOCK})
+            owner.commit()

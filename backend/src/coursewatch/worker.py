@@ -190,7 +190,7 @@ def run_cycle():
                         )
                         log.warning("Course %s check failed (%s)", course.id, type(exc).__name__)
                     db.commit()
-                    db.execute(delete(LoginSession).where(LoginSession.expires_at < now()))
+                db.execute(delete(LoginSession).where(LoginSession.expires_at < now()))
                 db.execute(
                     delete(LoginCode).where(LoginCode.created_at < now() - timedelta(days=1))
                 )
