@@ -1,0 +1,27 @@
+services:
+  # This VM already uses Nginx for other applications.
+  proxy:
+    profiles: [standalone-proxy]
+  web:
+    ports: ["127.0.0.1:3010:3000"]
+    mem_limit: 160m
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+  api:
+    ports: ["127.0.0.1:8010:8000"]
+    mem_limit: 128m
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+  worker:
+    mem_limit: 160m
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+  db:
+    mem_limit: 160m
+    command: ["postgres", "-c", "shared_buffers=32MB", "-c", "max_connections=30", "-c", "work_mem=2MB"]
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}

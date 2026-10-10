@@ -1,0 +1,26 @@
+name: Deployment images
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Linux images
+        run: |
+          docker build -f backend/Dockerfile -t coursewatch-api:${{ github.sha }} .
+          docker build -f web/Dockerfile -t coursewatch-web:${{ github.sha }} web
+      - name: Package images
+        run: |
+          mkdir -p artifacts
+          docker save coursewatch-api:${{ github.sha }} coursewatch-web:${{ github.sha }} | gzip > artifacts/images.tar.gz
+          cd artifacts
+          sha256sum images.tar.gz > images.sha256
+          printf '%s\n' '${{ github.sha }}' > revision.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coursewatch-images
+          path: artifacts/
+          retention-days: 7
