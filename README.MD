@@ -83,7 +83,7 @@ A local untracked `DEMO.md`, generated with Showboat, records reproducible test 
 
 ## Deploy to your DigitalOcean VM
 
-The existing 8 GB VM is the intended deployment target. The production stack keeps the Next.js web server, Python API, polling/email worker, and PostgreSQL running continuously. Caddy handles HTTPS and sends `/api/*` to the internal API. Only ports 80 and 443 are published. Cloudflare DNS can point to the VM; neither Cloudflare Pages nor GitHub Pages is needed to run this stack.
+The existing DigitalOcean VM is the deployment target; inspection showed 1 GB RAM, so the Nginx overlay below uses memory limits and prebuilt images. The production stack keeps the Next.js web server, Python API, polling/email worker, and PostgreSQL running continuously. Caddy handles HTTPS and sends `/api/*` to the internal API. Only ports 80 and 443 are published. Cloudflare DNS can point to the VM; neither Cloudflare Pages nor GitHub Pages is needed to run this stack.
 
 1. Install Docker and Compose on the VM and clone this private repository using your own GitHub credentials.
 2. Point a domain's DNS to the VM and permit inbound ports 80/443. Create `.env.production` from `.env.production.example`. Set matching `APP_HOST` and HTTPS `APP_ORIGIN`, random `AUTH_SECRET` and hex `POSTGRES_PASSWORD`, and the email settings.
@@ -104,7 +104,7 @@ mkdir -p .local/backups
 docker compose --env-file .env.production -f compose.production.yaml exec -T db pg_dump -U coursewatch -Fc coursewatch > .local/backups/coursewatch.dump
 ```
 
-The production Compose configuration has been validated. Container image builds and deployment on the VM have not been performed. The collector has passed a live Fall 2026 check; sustained operation and Spring 2027 behavior after publication still need observation. Telegram delivery is deferred.
+The production Compose configuration has been validated, Linux container images have been built, and the VM deployment is running behind its existing Nginx server. The collector has passed a live Fall 2026 check; sustained operation and Spring 2027 behavior after publication still need observation. Telegram delivery is deferred.
 
 ### Existing Nginx droplet
 
@@ -130,3 +130,11 @@ docker compose --env-file .env.production -p coursewatch -f compose.production.y
 The app/database secrets are generated locally and kept in ignored `.env.production` with mode 600; the server copy uses the same permissions. Set the real domain, email sender, and provider key before enabling public access. Render `deploy/nginx.conf.template` for the chosen host into a new Nginx site, add a publicly trusted TLS certificate, validate with `nginx -t`, and reload Nginx. The configuration template starts with HTTP for certificate bootstrap; production needs HTTPS because sessions use Secure cookies.
 
 The Linux images have been successfully built in GitHub Actions. Public DNS, HTTPS, and real email delivery require the user's chosen domain and email-provider credentials.
+
+### Current deployment
+
+The app is served at https://coursewatch.akarvirwebprojects.app with a publicly trusted Let's Encrypt certificate. HTTP redirects to HTTPS; `/api/health` is healthy. The API, worker, web service, and isolated database run as the `coursewatch` Compose project. Existing applications remain on their original ports.
+
+The VM has daily database backups under `/opt/coursewatch/backups` and a daily certificate-renewal job. `scripts/backup-db.sh` and `scripts/renew-tls.sh` contain the commands. VM-local backups should also be copied off the server.
+
+Real email delivery requires Resend verification of `coursewatch.akarvirwebprojects.app`, with sender `alerts@coursewatch.akarvirwebprojects.app`. The runtime key is sending-only. Domain creation/verification can be done in the Resend dashboard or with a separate temporary setup key kept locally; setup keys and DNS credentials are excluded from the server's runtime configuration. Existing root-domain MX/SPF records are separate from these subdomain records.
