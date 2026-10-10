@@ -116,7 +116,7 @@ export default function Home() {
       {loading ? <p role="status">Loading your watchlist…</p> : !account ?
         <section className="login card"><div><p className="eyebrow">YOUR CAMPUS, YOUR INBOX</p><h2>Start your watchlist</h2>
           <p>Sign in with your UMass email. A one-time code verifies your address; no password needed.</p>
-          <ul className="features"><li>Email alerts for new openings</li><li>Lecture + lab availability checked together</li><li>One watchlist, ready for registration</li></ul>
+          <ul className="features"><li>Email alerts for new openings</li><li>One watchlist, ready for registration</li></ul>
         </div><form onSubmit={login}><label htmlFor="email">UMass email</label>
           <input id="email" type="email" autoComplete="email" placeholder="you@umass.edu" required value={email} readOnly={codeSent} onChange={e => setEmail(e.target.value)} />
           {codeSent && <><label htmlFor="code">Verification code</label><input id="code" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} placeholder="000000" required value={code} onChange={e => setCode(e.target.value.replace(/\D/g, ""))} /></>}
@@ -160,7 +160,7 @@ export default function Home() {
             </article>;
           })}</div>
         </>}
-      <aside className="footnote"><strong>A heads-up, then you take it from there.</strong><p>Related sections are inferred from their labels. Confirm compatibility, prerequisites, and reserved seats in <a href="https://www.spire.umass.edu/" target="_blank" rel="noreferrer">SPIRE ↗</a>. We watch availability; you handle enrollment.</p><p>Checks run about every 5 minutes. Unpublished terms are checked hourly. The first successful check is a baseline; alerts follow new openings.</p></aside>
+      <aside className="footnote"><strong>A heads-up, then you take it from there.</strong><p>Confirm compatibility, prerequisites, and reserved seats in <a href="https://www.spire.umass.edu/" target="_blank" rel="noreferrer">SPIRE ↗</a>. We watch availability; you handle enrollment.</p></aside>
     </main>
     <footer><span>Course Watch</span><span>An independent project. Not affiliated with UMass Amherst.</span></footer>
   </div>;
