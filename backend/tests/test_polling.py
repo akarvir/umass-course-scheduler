@@ -145,3 +145,46 @@ def test_cadence_is_fixed_and_staggered():
     assert second == first + timedelta(minutes=5)
     claim.catalog_number = "250"
     assert next_due(claim, completed) != first
+
+
+def test_second_worker_cannot_duplicate_inflight_opening(db_engine, monkeypatch):
+    import coursewatch.worker as worker
+
+    with Session(db_engine) as db:
+        course, _ = setup_watch(db)
+        worker.observe(db, course, snapshot(False))
+        course.next_check_at = now() - timedelta(seconds=1)
+        db.commit()
+    started, proceed = threading.Event(), threading.Event()
+    calls = []
+
+    def collect(*args):
+        calls.append(args)
+        started.set()
+        assert proceed.wait(5)
+        return snapshot(True)
+
+    monkeypatch.setattr(worker, "engine", lambda: db_engine)
+    monkeypatch.setattr(worker.SpireClient, "collect", collect)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(worker.run_cycle)
+        assert started.wait(5)
+        try:
+            pool.submit(worker.run_cycle).result(timeout=5)
+        finally:
+            proceed.set()
+        first.result(timeout=5)
+    assert len(calls) == 1
+    with Session(db_engine) as db:
+        assert len(db.scalars(select(Delivery)).all()) == 1
+
+
+def test_polling_status_reports_due_and_leased_courses(db_engine):
+    from coursewatch.status import polling_status
+
+    with Session(db_engine) as db:
+        setup_watch(db)
+    assert claim_course(db_engine)
+    metrics = polling_status(db_engine)
+    assert metrics["watched_courses"] == metrics["due_courses"] == metrics["active_leases"] == 1
+    assert metrics["fresh_observations"] == 0
