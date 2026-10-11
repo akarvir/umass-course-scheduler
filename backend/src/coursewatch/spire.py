@@ -2,6 +2,8 @@ import argparse
 import json
 import re
 import time
+from copy import deepcopy
+from datetime import UTC, datetime
 from urllib.parse import urljoin, urlparse
 
 import httpx
@@ -106,6 +108,87 @@ def parse_detail(html: str, identity: dict):
     }
 
 
+def parse_search_rows(soup):
+    links = soup.find_all("a", id=re.compile(r"^DERIVED_CLSRCH_SSR_CLASSNAME_LONG\$\d+$"))
+    if not links or len(links) > 80:
+        raise SourceError("SPIRE search rows missing or exceed the 80-section limit")
+    rows = []
+    for link in links:
+        match = re.fullmatch(r"([A-Za-z0-9]+)-([A-Z]+)\((\d{5})\)", link.get_text(strip=True))
+        if not match:
+            raise SourceError("Unexpected section identifier")
+        index = link["id"].split("$")[-1]
+        status_element = soup.find(id=f"win0divDERIVED_CLSRCH_SSR_STATUS_LONG${index}")
+        image = status_element.find("img") if status_element else None
+        status = image.get("alt", "") if image else ""
+        if status not in {"Open", "Closed", "Wait List", "Waitlist", "Cancelled", "Canceled"}:
+            raise SourceError("SPIRE search status missing or unrecognized")
+        counts = []
+        for name in ("ENRL_CAP", "ENRL_TOT"):
+            raw = field(soup, f"UM_DERIVED_SR_{name}${index}").replace(",", "")
+            if not re.fullmatch(r"\d+", raw):
+                raise SourceError("SPIRE search counts missing or unrecognized")
+            counts.append(int(raw))
+        meetings = soup.find(id=f"win0divSSR_CLSRCH_MTG1${index}")
+        if meetings is None:
+            raise SourceError("SPIRE search meetings missing")
+        rows.append(
+            {
+                "action": link["id"],
+                "section": match[1],
+                "component": match[2],
+                "class_number": match[3],
+                "status": status,
+                "capacity": counts[0],
+                "enrolled": counts[1],
+                "available_seats": counts[0] - counts[1],
+                "search_structure": {
+                    "session": field(soup, f"PSXLATITEM_XLATSHORTNAME${index}"),
+                    "meetings": meetings.get_text(" ", strip=True),
+                },
+            }
+        )
+    if len({r["class_number"] for r in rows}) != len(rows):
+        raise SourceError("Duplicate SPIRE class identifiers")
+    return rows
+
+
+def fast_sections(rows, cached, term, subject, catalog_number):
+    if not cached or not cached.get("search_counts_validated"):
+        return None
+    if (cached.get("term"), cached.get("subject"), cached.get("catalog_number")) != (
+        term,
+        subject,
+        catalog_number,
+    ):
+        return None
+    try:
+        validated = datetime.fromisoformat(cached["details_validated_at"])
+        if validated.tzinfo is None or (datetime.now(UTC) - validated).total_seconds() >= (
+            settings().detail_refresh_seconds
+        ):
+            return None
+        old = {section["class_number"]: section for section in cached["sections"]}
+        if set(old) != {r["class_number"] for r in rows}:
+            return None
+        sections = []
+        for row in rows:
+            previous = old[row["class_number"]]
+            if any(
+                previous.get(key) != row[key]
+                for key in ("section", "component", "search_structure", "capacity")
+            ):
+                return None
+            updated = deepcopy(previous)
+            updated.update(
+                {k: row[k] for k in ("status", "capacity", "enrolled", "available_seats")}
+            )
+            sections.append(updated)
+        return sections
+    except (KeyError, ValueError, TypeError):
+        return None
+
+
 class SpireClient:
     def __init__(self):
         self.client = httpx.Client(
@@ -196,32 +279,41 @@ class SpireClient:
         # Require the requested course identity somewhere in the result heading.
         if not re.search(rf"\b{re.escape(subject)}\s+{re.escape(catalog_number)}\b", content):
             raise SourceError("SPIRE result course identity could not be verified")
-        links = self.soup.find_all("a", id=re.compile(r"^DERIVED_CLSRCH_SSR_CLASSNAME_LONG\$\d+$"))
-        if not links:
-            raise SourceError("SPIRE result rows missing; search may be interrupted")
-        if len(links) > 80:
-            raise SourceError("More than 80 sections; narrow collection before proceeding")
-        identities = []
-        for link in links:
-            match = re.fullmatch(r"([A-Za-z0-9]+)-([A-Z]+)\((\d{5})\)", link.get_text(strip=True))
-            if not match:
-                raise SourceError("Unexpected section identifier")
-            identities.append(
-                {
-                    "action": link["id"],
-                    "section": match[1],
-                    "component": match[2],
-                    "class_number": match[3],
-                }
+        rows = parse_search_rows(self.soup)
+        sections = fast_sections(rows, self.cached_snapshot, term, subject, catalog_number)
+        mode = "search"
+        if sections is not None:
+            bundles, issues = build_bundles(sections)
+            previously_open = {b["key"] for b in self.cached_snapshot["bundles"] if b["open"]}
+            newly_open = {b["key"] for b in bundles if b["open"]} - previously_open
+            if newly_open:
+                sections = None
+        if sections is None:
+            mode = "details"
+            sections = []
+            for row in rows:
+                identity = {key: row[key] for key in ("section", "component", "class_number")}
+                html = self.action(row["action"])
+                detail = parse_detail(html, identity)
+                detail["search_structure"] = row["search_structure"]
+                sections.append(detail)
+                self.action("CLASS_SRCH_WRK2_SSR_PB_BACK")
+            bundles, issues = build_bundles(sections)
+            counts_validated = all(
+                all(
+                    detail[key] == row[key]
+                    for key in ("status", "capacity", "enrolled", "available_seats")
+                )
+                for row, detail in zip(rows, sections, strict=True)
             )
-        sections = []
-        for row in identities:
-            action = row.pop("action")
-            html = self.action(action)
-            sections.append(parse_detail(html, row))
-            self.action("CLASS_SRCH_WRK2_SSR_PB_BACK")
-        bundles, issues = build_bundles(sections)
+            validated_at = datetime.now(UTC).isoformat()
+        else:
+            counts_validated = True
+            validated_at = self.cached_snapshot["details_validated_at"]
         return {
+            "collection_mode": mode,
+            "details_validated_at": validated_at,
+            "search_counts_validated": counts_validated,
             "term": term,
             "subject": subject,
             "catalog_number": catalog_number,
