@@ -10,7 +10,6 @@ import httpx
 from sqlalchemy import delete, func, select, text
 from sqlalchemy.orm import Session
 
-from coursewatch.availability import open_bundles
 from coursewatch.config import settings
 from coursewatch.db import engine
 from coursewatch.email import send_email
@@ -21,10 +20,10 @@ from coursewatch.models import (
     LoginCode,
     LoginSession,
     TermProbe,
-    User,
     Watch,
     now,
 )
+from coursewatch.notifications import CourseAvailabilityEvent, CourseOpeningPublisher
 from coursewatch.polling import next_due, wait_for_request
 from coursewatch.spire import CourseUnavailable, SpireClient, TermUnavailable
 
@@ -41,60 +40,11 @@ def observe(db: Session, course: Course, snapshot: dict):
     course.detail = "Availability checked. Related sections are inferred; verify in SPIRE."
     course.failures = 0
     course.next_check_at = timestamp + timedelta(seconds=settings().poll_interval_seconds)
-    sections = {s["class_number"]: s for s in snapshot["sections"]}
-    for watch in db.scalars(select(Watch).where(Watch.course_id == course.id).with_for_update()):
-        opened = open_bundles(snapshot, watch.class_number)
-        keys = [b["key"] for b in opened]
-        # The first successful check establishes a baseline. No alert for already-open seats.
-        if watch.previous_open is not None:
-            new = [b for b in opened if b["key"] not in watch.previous_open]
-            if new:
-                watch.event_number += 1
-                lines = [
-                    f"{course.subject} {course.catalog_number} — {course.term}",
-                    f"Observed: {timestamp.isoformat()}",
-                    "",
-                ]
-                for bundle in new:
-                    lines.append("Opening: " + " + ".join(bundle["class_numbers"]))
-                    for number in bundle["class_numbers"]:
-                        section = sections[number]
-                        lines.extend(
-                            [
-                                f"{section['section']}-{section['component']} (class {number}): "
-                                f"{section['available_seats']} available seats",
-                                "Meetings: " + "; ".join(section["meetings"]),
-                                "Restrictions: " + (section["restrictions"] or "Check SPIRE"),
-                            ]
-                        )
-                    if bundle["inferred"]:
-                        lines.append(
-                            "PAIRING INFERRED from section labels. "
-                            "Verify lecture/lab compatibility in SPIRE."
-                        )
-                    if bundle["schedule_unknown"]:
-                        lines.append("Some meeting times are unknown; check schedule conflicts.")
-                    lines.append("")
-                lines.extend(
-                    [
-                        "An opening does not guarantee eligibility or enrollment. "
-                        "Check prerequisites, "
-                        "reserved seats, registration appointments, and holds.",
-                        "SPIRE: https://www.spire.umass.edu/",
-                        "Manage watches: " + settings().app_origin,
-                    ]
-                )
-                user = db.get(User, watch.user_id)
-                db.add(
-                    Delivery(
-                        watch_id=watch.id,
-                        event_number=watch.event_number,
-                        recipient=user.email,
-                        subject=f"Opening: {course.subject} {course.catalog_number}",
-                        body="\n".join(lines),
-                    )
-                )
-        watch.previous_open = keys
+    CourseOpeningPublisher(db).publish(
+        CourseAvailabilityEvent(
+            course.id, course.term, course.subject, course.catalog_number, snapshot, timestamp
+        )
+    )
 
 
 def deliver(db: Session):
