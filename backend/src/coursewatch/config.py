@@ -20,11 +20,18 @@ class Settings(BaseSettings):
     resend_api_key: str = ""
     poll_interval_seconds: int = 300
     spire_request_interval_seconds: float = 3
+    poll_concurrency: int = 3
+    poll_lease_seconds: int = 180
+    detail_refresh_seconds: int = 3600
 
     @model_validator(mode="after")
     def validate_settings(self):
         if self.poll_interval_seconds < 120 or self.spire_request_interval_seconds < 1:
             raise ValueError("Polling must be at least 120s, with at least 1s between requests")
+        if not 1 <= self.poll_concurrency <= 8 or self.poll_lease_seconds < 60:
+            raise ValueError("Use 1–8 collectors and leases of at least 60 seconds")
+        if self.detail_refresh_seconds < self.poll_interval_seconds:
+            raise ValueError("Detail refresh must be at least the polling interval")
         if self.email_backend not in {"smtp", "resend"}:
             raise ValueError("EMAIL_BACKEND must be smtp or resend")
         if self.environment == "production":

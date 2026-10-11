@@ -48,8 +48,16 @@ class Course(Base):
     snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    next_check_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    next_check_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now, index=True
+    )
     failures: Mapped[int] = mapped_column(default=0)
+    lease_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_check_seconds: Mapped[float | None] = mapped_column(nullable=True)
+    last_request_count: Mapped[int | None] = mapped_column(nullable=True)
 
 
 class Watch(Base):
@@ -77,3 +85,15 @@ class Delivery(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     attempts: Mapped[int] = mapped_column(default=0)
+
+
+class PollingBudget(Base):
+    __tablename__ = "polling_budget"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    next_request_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class TermProbe(Base):
+    __tablename__ = "term_probes"
+    term: Mapped[str] = mapped_column(String(32), primary_key=True)
+    retry_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
