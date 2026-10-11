@@ -177,6 +177,9 @@ def test_worker_only_queries_shared_course_once(db_engine, monkeypatch):
 
 
 def test_worker_term_unpublished_is_shared_and_unknown(db_engine, monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr("coursewatch.worker.settings", lambda: SimpleNamespace(poll_concurrency=1))
     import coursewatch.worker as worker
     from coursewatch.spire import TermUnavailable
     from sqlalchemy.orm import Session
@@ -204,22 +207,16 @@ def test_worker_term_unpublished_is_shared_and_unknown(db_engine, monkeypatch):
         assert all(c.next_check_at > now() + timedelta(minutes=50) for c in courses)
 
 
-def test_polling_lock_blocks_second_worker(db_engine, monkeypatch):
+def test_active_course_lease_blocks_duplicate_collection(db_engine, monkeypatch):
     import coursewatch.worker as worker
-    from sqlalchemy import text
+    from coursewatch.polling import claim_course
     from sqlalchemy.orm import Session
 
     with Session(db_engine) as db:
         setup_watch(db)
     monkeypatch.setattr(worker, "engine", lambda: db_engine)
+    assert claim_course(db_engine) is not None
     calls = []
     monkeypatch.setattr(worker.SpireClient, "collect", lambda *args: calls.append(args))
-    with db_engine.connect() as owner:
-        owner.execute(text("SELECT pg_advisory_lock(:key)"), {"key": worker.WORKER_LOCK})
-        owner.commit()
-        try:
-            worker.run_cycle()
-            assert calls == []
-        finally:
-            owner.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": worker.WORKER_LOCK})
-            owner.commit()
+    worker.run_cycle()
+    assert calls == []

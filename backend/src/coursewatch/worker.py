@@ -2,18 +2,30 @@ import argparse
 import logging
 import signal
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 
 import httpx
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.orm import Session
 
 from coursewatch.availability import open_bundles
 from coursewatch.config import settings
 from coursewatch.db import engine
 from coursewatch.email import send_email
-from coursewatch.models import Course, Delivery, LoginCode, LoginSession, User, Watch, now
-from coursewatch.spire import CourseUnavailable, SourceError, SpireClient, TermUnavailable
+from coursewatch.models import (
+    Course,
+    Delivery,
+    LoginCode,
+    LoginSession,
+    TermProbe,
+    User,
+    Watch,
+    now,
+)
+from coursewatch.polling import Heartbeat, LeaseLost, claim_course, next_due, wait_for_request
+from coursewatch.spire import CourseUnavailable, SpireClient, TermUnavailable
 
 log = logging.getLogger(__name__)
 WORKER_LOCK = 731920271
@@ -137,67 +149,117 @@ def delivery_loop():
         stop.wait(2)
 
 
-def run_cycle():
-    with engine().connect() as connection:
-        acquired = connection.scalar(
-            text("SELECT pg_try_advisory_lock(:key)"), {"key": WORKER_LOCK}
-        )
-        connection.commit()
-        if not acquired:
-            log.info("Another worker owns the polling lock")
-            return
-        try:
-            with Session(bind=connection) as db:
-                courses = db.scalars(
-                    select(Course)
-                    .where(
-                        Course.next_check_at <= now(),
-                        select(Watch.id).where(Watch.course_id == Course.id).exists(),
+def finish_claim(claim, snapshot=None, error=None, duration=0, request_count=0):
+    with Session(engine()) as db, db.begin():
+        course = db.scalar(select(Course).where(Course.id == claim.course_id).with_for_update())
+        timestamp = db.scalar(select(func.clock_timestamp()))
+        if (
+            course is None
+            or course.lease_token != claim.token
+            or course.lease_expires_at is None
+            or course.lease_expires_at <= timestamp
+        ):
+            log.warning("Discarding stale result for course %s", claim.course_id)
+            return False
+        course.checked_at = timestamp
+        course.last_check_seconds, course.last_request_count = duration, request_count
+        if error is None:
+            observe(db, course, snapshot)
+            course.next_check_at = next_due(claim, timestamp)
+        elif isinstance(error, TermUnavailable):
+            from sqlalchemy.dialects.postgresql import insert
+
+            probe = db.get(TermProbe, claim.term)
+            retry_at = (
+                probe.retry_at
+                if probe and probe.retry_at > timestamp
+                else timestamp + timedelta(hours=1)
+            )
+            db.execute(
+                insert(TermProbe)
+                .values(term=claim.term, retry_at=retry_at)
+                .on_conflict_do_update(index_elements=[TermProbe.term], set_={"retry_at": retry_at})
+            )
+            course.state, course.detail = "term_unpublished", str(error)
+            course.next_check_at = retry_at
+        elif isinstance(error, CourseUnavailable):
+            course.state, course.detail = "course_unpublished", str(error)
+            course.next_check_at = timestamp + timedelta(hours=1)
+        else:
+            course.failures += 1
+            course.state = "error"
+            course.detail = "SPIRE check failed; last successful observation retained"
+            course.next_check_at = timestamp + timedelta(
+                seconds=min(3600, settings().poll_interval_seconds * 2 ** min(course.failures, 4))
+            )
+            log.warning("Course %s check failed (%s)", course.id, type(error).__name__)
+        course.lease_token = None
+        course.lease_expires_at = None
+    return True
+
+
+def poll_one(_=None):
+    if stop.is_set():
+        return
+    claim = claim_course(engine())
+    if claim is None:
+        return
+    started = time.monotonic()
+    requests = 0
+    snapshot, error = None, None
+    try:
+        with Heartbeat(engine(), claim) as heartbeat:
+            with Session(engine()) as db:
+                probe = db.get(TermProbe, claim.term)
+                if probe and probe.retry_at > now():
+                    raise TermUnavailable(
+                        f"{claim.term} is not published in SPIRE guest search yet"
                     )
-                    .order_by(Course.next_check_at)
-                ).all()
-                unavailable_terms = set()
-                for course in courses:
-                    if stop.is_set():
-                        break
-                    course.checked_at = now()
-                    try:
-                        if course.term in unavailable_terms:
-                            raise TermUnavailable(
-                                f"{course.term} is not published in guest search yet"
-                            )
-                        with SpireClient() as client:
-                            snapshot = client.collect(
-                                course.term, course.subject, course.catalog_number
-                            )
-                        observe(db, course, snapshot)
-                    except TermUnavailable as exc:
-                        unavailable_terms.add(course.term)
-                        course.state, course.detail = "term_unpublished", str(exc)
-                        course.next_check_at = now() + timedelta(hours=1)
-                    except CourseUnavailable as exc:
-                        course.state, course.detail = "course_unpublished", str(exc)
-                        course.next_check_at = now() + timedelta(hours=1)
-                    except (SourceError, httpx.HTTPError) as exc:
-                        course.failures += 1
-                        course.state = "error"
-                        course.detail = "SPIRE check failed; last successful observation retained"
-                        course.next_check_at = now() + timedelta(
-                            seconds=min(
-                                3600,
-                                settings().poll_interval_seconds * 2 ** min(course.failures, 4),
-                            )
-                        )
-                        log.warning("Course %s check failed (%s)", course.id, type(exc).__name__)
-                    db.commit()
-                db.execute(delete(LoginSession).where(LoginSession.expires_at < now()))
-                db.execute(
-                    delete(LoginCode).where(LoginCode.created_at < now() - timedelta(days=1))
+            with SpireClient() as client:
+                client.before_request = lambda: wait_for_request(
+                    engine(), lambda: stop.is_set() or heartbeat.lost.is_set()
                 )
-                db.commit()
-        finally:
-            connection.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": WORKER_LOCK})
-            connection.commit()
+                client.cached_snapshot = claim.snapshot
+                snapshot = client.collect(claim.term, claim.subject, claim.catalog_number)
+                requests = client.request_count
+            if heartbeat.lost.is_set():
+                raise LeaseLost("Lease renewal failed")
+    except LeaseLost:
+        log.warning("Abandoning course %s after ownership loss or shutdown", claim.course_id)
+        return
+    except Exception as exc:
+        error = exc
+        if "client" in locals():
+            requests = client.request_count
+    duration = time.monotonic() - started
+    saved = finish_claim(claim, snapshot, error, duration, requests)
+    log.info(
+        "Course %s check: saved=%s seconds=%.1f requests=%s lateness_seconds=%.1f mode=%s",
+        claim.course_id,
+        saved,
+        duration,
+        requests,
+        max(0, (now() - claim.due_at).total_seconds() - duration),
+        snapshot.get("collection_mode", "full") if snapshot else "unavailable",
+    )
+
+
+def run_cycle():
+    with Session(engine()) as db:
+        due = db.scalar(
+            select(func.count())
+            .select_from(Course)
+            .where(
+                Course.next_check_at <= now(),
+                select(Watch.id).where(Watch.course_id == Course.id).exists(),
+            )
+        )
+    if due:
+        with ThreadPoolExecutor(max_workers=settings().poll_concurrency) as pool:
+            list(pool.map(poll_one, range(min(due, 1000))))
+    with Session(engine()) as db, db.begin():
+        db.execute(delete(LoginSession).where(LoginSession.expires_at < now()))
+        db.execute(delete(LoginCode).where(LoginCode.created_at < now() - timedelta(days=1)))
 
 
 def main():

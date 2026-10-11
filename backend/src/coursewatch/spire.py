@@ -109,10 +109,16 @@ def parse_detail(html: str, identity: dict):
 class SpireClient:
     def __init__(self):
         self.client = httpx.Client(
-            follow_redirects=True, timeout=40, headers={"User-Agent": "UMassCourseWatch/0.1"}
+            follow_redirects=True,
+            timeout=40,
+            headers={"User-Agent": "UMassCourseWatch/0.1"},
+            event_hooks={"request": [self.before_http_request]},
         )
         self.soup = None
         self.last_request = 0.0
+        self.request_count = 0
+        self.before_request = None
+        self.cached_snapshot = None
 
     def __enter__(self):
         return self
@@ -123,19 +129,26 @@ class SpireClient:
     def request(self, method, url, **kwargs):
         if urlparse(url).hostname != urlparse(BASE).hostname:
             raise SourceError("Unexpected SPIRE form host")
-        time.sleep(
-            max(
-                0,
-                settings().spire_request_interval_seconds - (time.monotonic() - self.last_request),
-            )
-        )
-        self.last_request = time.monotonic()
         response = self.client.request(method, url, **kwargs)
         response.raise_for_status()
         if urlparse(str(response.url)).hostname != urlparse(BASE).hostname:
             raise SourceError("SPIRE redirected outside the guest interface")
         self.soup = BeautifulSoup(response.text, "html.parser")
         return response.text
+
+    def before_http_request(self, request):
+        if request.url.host != urlparse(BASE).hostname:
+            raise SourceError("Unexpected SPIRE redirect host")
+        time.sleep(
+            max(
+                0,
+                settings().spire_request_interval_seconds - (time.monotonic() - self.last_request),
+            )
+        )
+        if self.before_request:
+            self.before_request()
+        self.last_request = time.monotonic()
+        self.request_count += 1
 
     def start(self):
         self.request(
