@@ -14,6 +14,7 @@ from coursewatch.availability import open_bundles
 from coursewatch.config import settings
 from coursewatch.db import engine
 from coursewatch.email import send_email
+from coursewatch.leases import LeaseLost, LeaseManager
 from coursewatch.models import (
     Course,
     Delivery,
@@ -24,7 +25,7 @@ from coursewatch.models import (
     Watch,
     now,
 )
-from coursewatch.polling import Heartbeat, LeaseLost, claim_course, next_due, wait_for_request
+from coursewatch.polling import next_due, wait_for_request
 from coursewatch.spire import CourseUnavailable, SpireClient, TermUnavailable
 
 log = logging.getLogger(__name__)
@@ -149,18 +150,8 @@ def delivery_loop():
         stop.wait(2)
 
 
-def finish_claim(claim, snapshot=None, error=None, duration=0, request_count=0):
-    with Session(engine()) as db, db.begin():
-        course = db.scalar(select(Course).where(Course.id == claim.course_id).with_for_update())
-        timestamp = db.scalar(select(func.clock_timestamp()))
-        if (
-            course is None
-            or course.lease_token != claim.token
-            or course.lease_expires_at is None
-            or course.lease_expires_at <= timestamp
-        ):
-            log.warning("Discarding stale result for course %s", claim.course_id)
-            return False
+def finish_claim(claim, snapshot=None, error=None, duration=0, request_count=0, lease_manager=None):
+    def save_result(db, course, timestamp):
         course.checked_at = timestamp
         course.last_check_seconds, course.last_request_count = duration, request_count
         if error is None:
@@ -193,22 +184,25 @@ def finish_claim(claim, snapshot=None, error=None, duration=0, request_count=0):
                 seconds=min(3600, settings().poll_interval_seconds * 2 ** min(course.failures, 4))
             )
             log.warning("Course %s check failed (%s)", course.id, type(error).__name__)
-        course.lease_token = None
-        course.lease_expires_at = None
-    return True
+
+    saved = (lease_manager or LeaseManager(engine())).complete(claim, save_result)
+    if not saved:
+        log.warning("Discarding stale result for course %s", claim.course_id)
+    return saved
 
 
 def poll_one(_=None):
     if stop.is_set():
         return
-    claim = claim_course(engine())
+    lease_manager = LeaseManager(engine())
+    claim = lease_manager.claim()
     if claim is None:
         return
     started = time.monotonic()
     requests = 0
     snapshot, error = None, None
     try:
-        with Heartbeat(engine(), claim) as heartbeat:
+        with lease_manager.heartbeat(claim) as heartbeat:
             with Session(engine()) as db:
                 probe = db.get(TermProbe, claim.term)
                 if probe and probe.retry_at > now():
@@ -232,7 +226,7 @@ def poll_one(_=None):
         if "client" in locals():
             requests = client.request_count
     duration = time.monotonic() - started
-    saved = finish_claim(claim, snapshot, error, duration, requests)
+    saved = finish_claim(claim, snapshot, error, duration, requests, lease_manager)
     log.info(
         "Course %s check: saved=%s seconds=%.1f requests=%s lateness_seconds=%.1f mode=%s",
         claim.course_id,

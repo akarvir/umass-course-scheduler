@@ -3,8 +3,9 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from types import SimpleNamespace
 
+from coursewatch.leases import LeaseManager
 from coursewatch.models import Course, Delivery, TermProbe, Watch, now
-from coursewatch.polling import claim_course, next_due, renew_lease, wait_for_request
+from coursewatch.polling import next_due, wait_for_request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from test_worker import setup_watch, snapshot
@@ -19,7 +20,7 @@ def test_concurrent_claims_share_no_course(db_engine):
         db.add(Watch(user_id=watch.user_id, course_id=second.id))
         db.commit()
     with ThreadPoolExecutor(max_workers=3) as pool:
-        claims = list(pool.map(lambda _: claim_course(db_engine), range(3)))
+        claims = list(pool.map(lambda _: LeaseManager(db_engine).claim(), range(3)))
     assert len([c for c in claims if c]) == 2
     assert len({c.course_id for c in claims if c}) == 2
 
@@ -34,12 +35,12 @@ def test_expired_owner_cannot_save_or_renew_after_reclaim(db_engine, monkeypatch
         db.commit()
         cid = course.id
     monkeypatch.setattr(worker, "engine", lambda: db_engine)
-    old = claim_course(db_engine)
+    old = LeaseManager(db_engine).claim()
     with Session(db_engine) as db, db.begin():
         db.get(Course, cid).lease_expires_at = now() - timedelta(seconds=1)
-    fresh = claim_course(db_engine)
+    fresh = LeaseManager(db_engine).claim()
     assert fresh.token != old.token
-    assert not renew_lease(db_engine, old)
+    assert not LeaseManager(db_engine).renew(old)
     assert not worker.finish_claim(old, snapshot(True))
     assert worker.finish_claim(fresh, snapshot(True))
     assert not worker.finish_claim(fresh, snapshot(True))
@@ -54,7 +55,7 @@ def test_expired_owner_cannot_save_before_reclaim(db_engine, monkeypatch):
     with Session(db_engine) as db:
         course, _ = setup_watch(db)
         cid = course.id
-    claim = claim_course(db_engine)
+    claim = LeaseManager(db_engine).claim()
     with Session(db_engine) as db, db.begin():
         db.get(Course, cid).lease_expires_at = now() - timedelta(seconds=1)
     monkeypatch.setattr(worker, "engine", lambda: db_engine)
@@ -65,10 +66,10 @@ def test_renewal_extends_only_current_owner(db_engine):
     with Session(db_engine) as db:
         course, _ = setup_watch(db)
         cid = course.id
-    claim = claim_course(db_engine)
+    claim = LeaseManager(db_engine).claim()
     with Session(db_engine) as db, db.begin():
         db.get(Course, cid).lease_expires_at = now() + timedelta(seconds=10)
-    assert renew_lease(db_engine, claim)
+    assert LeaseManager(db_engine).renew(claim)
     with Session(db_engine) as db:
         assert db.get(Course, cid).lease_expires_at > now() + timedelta(seconds=100)
 
@@ -128,7 +129,7 @@ def test_new_watches_do_not_extend_unpublished_term_retry(db_engine, monkeypatch
         retry = now() + timedelta(minutes=30)
         db.add(TermProbe(term=course.term, retry_at=retry))
         db.commit()
-    claim = claim_course(db_engine)
+    claim = LeaseManager(db_engine).claim()
     monkeypatch.setattr(worker, "engine", lambda: db_engine)
     assert worker.finish_claim(claim, error=TermUnavailable("Not published"))
     with Session(db_engine) as db:
@@ -184,7 +185,39 @@ def test_polling_status_reports_due_and_leased_courses(db_engine):
 
     with Session(db_engine) as db:
         setup_watch(db)
-    assert claim_course(db_engine)
+    assert LeaseManager(db_engine).claim()
     metrics = polling_status(db_engine)
     assert metrics["watched_courses"] == metrics["due_courses"] == metrics["active_leases"] == 1
     assert metrics["fresh_observations"] == 0
+
+
+def test_lease_completion_rolls_back_alerts_state_and_release_together(db_engine):
+    import pytest
+    from coursewatch.worker import observe
+
+    with Session(db_engine) as db:
+        course, watch = setup_watch(db)
+        observe(db, course, snapshot(False))
+        course.next_check_at = now() - timedelta(seconds=1)
+        db.commit()
+        watch_id = watch.id
+    manager = LeaseManager(db_engine)
+    claim = manager.claim()
+
+    def fail_after_observation(db, course, timestamp):
+        observe(db, course, snapshot(True))
+        db.flush()
+        raise RuntimeError("Interrupted completion")
+
+    with pytest.raises(RuntimeError, match="Interrupted completion"):
+        manager.complete(claim, fail_after_observation)
+    with Session(db_engine) as db:
+        assert db.scalar(select(Delivery)) is None
+        assert db.get(Watch, watch_id).previous_open == []
+        assert db.get(Course, claim.course_id).lease_token == claim.token
+    assert manager.complete(
+        claim, lambda db, course, timestamp: observe(db, course, snapshot(True))
+    )
+    with Session(db_engine) as db:
+        assert len(db.scalars(select(Delivery)).all()) == 1
+        assert db.get(Course, claim.course_id).lease_token is None

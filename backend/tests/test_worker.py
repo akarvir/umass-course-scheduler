@@ -209,13 +209,13 @@ def test_worker_term_unpublished_is_shared_and_unknown(db_engine, monkeypatch):
 
 def test_active_course_lease_blocks_duplicate_collection(db_engine, monkeypatch):
     import coursewatch.worker as worker
-    from coursewatch.polling import claim_course
+    from coursewatch.leases import LeaseManager
     from sqlalchemy.orm import Session
 
     with Session(db_engine) as db:
         setup_watch(db)
     monkeypatch.setattr(worker, "engine", lambda: db_engine)
-    assert claim_course(db_engine) is not None
+    assert LeaseManager(db_engine).claim() is not None
     calls = []
     monkeypatch.setattr(worker.SpireClient, "collect", lambda *args: calls.append(args))
     worker.run_cycle()
