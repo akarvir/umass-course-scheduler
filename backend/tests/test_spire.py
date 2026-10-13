@@ -93,7 +93,7 @@ def test_new_opening_is_confirmed_with_detail_counts():
     soup.find(id="UM_DERIVED_SR_ENRL_TOT$1").string = "34"
     soup.find(id="win0divDERIVED_CLSRCH_SSR_STATUS_LONG$1").find("img")["alt"] = "Open"
     result, requests = collect(str(soup), cached=initial, seat_mismatch=True)
-    assert result["collection_mode"] == "details" and requests == 7
+    assert result["collection_mode"] == "confirm" and requests == 7
     assert not result["search_counts_validated"]
     assert not any(b["open"] for b in result["bundles"])
 
@@ -234,3 +234,75 @@ def test_reused_session_rejects_wrong_course_results():
         with pytest.raises(SourceError, match="course identity"):
             client.collect("2026 Fall", "COMPSCI", "250")
         assert not client.search_ready
+
+
+def search_with_extra_component(component="LAB"):
+    soup = BeautifulSoup(SEARCH, "html.parser")
+    for name in (
+        "DERIVED_CLSRCH_SSR_CLASSNAME_LONG$1",
+        "win0divDERIVED_CLSRCH_SSR_STATUS_LONG$1",
+        "UM_DERIVED_SR_ENRL_CAP$1",
+        "UM_DERIVED_SR_ENRL_TOT$1",
+        "PSXLATITEM_XLATSHORTNAME$1",
+        "win0divSSR_CLSRCH_MTG1$1",
+    ):
+        node = BeautifulSoup(str(soup.find(id=name)), "html.parser")
+        for element in node.find_all(id=True):
+            element["id"] = element["id"].replace("$1", "$2")
+        soup.body.append(node)
+    soup.find(id="DERIVED_CLSRCH_SSR_CLASSNAME_LONG$2").string = f"01LM-{component}(12098)"
+    soup.find(id="UM_DERIVED_SR_ENRL_TOT$2").string = "34"
+    soup.find(id="win0divDERIVED_CLSRCH_SSR_STATUS_LONG$2").find("img")["alt"] = "Open"
+    return str(soup)
+
+
+def open_first_lab(search):
+    soup = BeautifulSoup(search, "html.parser")
+    soup.find(id="UM_DERIVED_SR_ENRL_TOT$1").string = "34"
+    soup.find(id="win0divDERIVED_CLSRCH_SSR_STATUS_LONG$1").find("img")["alt"] = "Open"
+    return str(soup)
+
+
+def test_confirmation_fetches_only_sections_in_new_opening():
+    with FixtureClient(search_with_extra_component()) as client:
+        baseline = client.collect("2026 Fall", "COMPSCI", "220")
+        client.cached_snapshot = baseline
+        client.search = open_first_lab(client.search)
+        confirmed = []
+        original = client.read_detail
+
+        def read(row):
+            confirmed.append(row["class_number"])
+            return original(row)
+
+        client.read_detail = read
+        result = client.collect("2026 Fall", "COMPSCI", "220")
+        assert result["collection_mode"] == "confirm"
+        assert confirmed == ["12073", "12075"]
+        assert client.request_count == 6
+        assert result["details_validated_at"] == baseline["details_validated_at"]
+        assert len([b for b in result["bundles"] if b["open"]]) == 2
+        assert baseline["sections"][1]["available_seats"] == 0
+
+
+def test_confirmation_also_validates_newly_discovered_required_component():
+    with FixtureClient(search_with_extra_component("DIS")) as client:
+        baseline = client.collect("2026 Fall", "COMPSCI", "220")
+        client.cached_snapshot = baseline
+        client.search = open_first_lab(client.search)
+        confirmed = []
+        original = client.read_detail
+
+        def read(row):
+            confirmed.append(row["class_number"])
+            detail = original(row)
+            if row["component"] == "LEC":
+                detail["required_components"] = ["LEC", "LAB", "DIS"]
+            return detail
+
+        client.read_detail = read
+        result = client.collect("2026 Fall", "COMPSCI", "220")
+        assert confirmed == ["12073", "12075", "12098"]
+        assert client.request_count == 8
+        assert result["bundles"][0]["open"]
+        assert result["bundles"][0]["class_numbers"] == ["12073", "12075", "12098"]

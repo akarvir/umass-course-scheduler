@@ -270,6 +270,38 @@ class SpireClient:
                 self.client = self.new_http_client()
         self.start()
 
+    def read_detail(self, row):
+        identity = {key: row[key] for key in ("section", "component", "class_number")}
+        detail = parse_detail(self.action(row["action"]), identity)
+        detail["search_structure"] = row["search_structure"]
+        self.action("CLASS_SRCH_WRK2_SSR_PB_BACK")
+        return detail
+
+    @staticmethod
+    def counts_match(row, detail):
+        return all(
+            detail[key] == row[key] for key in ("status", "capacity", "enrolled", "available_seats")
+        )
+
+    def confirm_openings(self, rows, sections, previously_open):
+        by_number = {section["class_number"]: section for section in sections}
+        confirmed = set()
+        while True:
+            bundles, _ = build_bundles(list(by_number.values()))
+            needed = {
+                number
+                for bundle in bundles
+                if bundle["open"] and bundle["key"] not in previously_open
+                for number in bundle["class_numbers"]
+            } - confirmed
+            if not needed:
+                return [by_number[row["class_number"]] for row in rows], confirmed
+            # Rebuild after each batch: detail pages may reveal additional required components.
+            for row in rows:
+                if row["class_number"] in needed:
+                    by_number[row["class_number"]] = self.read_detail(row)
+                    confirmed.add(row["class_number"])
+
     def collect(self, term, subject, catalog_number):
         self.request_count = 0
         self.prepare_search()
@@ -304,34 +336,26 @@ class SpireClient:
         rows = parse_search_rows(self.soup)
         sections = fast_sections(rows, self.cached_snapshot, term, subject, catalog_number)
         mode = "search"
-        if sections is not None:
-            bundles, issues = build_bundles(sections)
-            previously_open = {b["key"] for b in self.cached_snapshot["bundles"] if b["open"]}
-            newly_open = {b["key"] for b in bundles if b["open"]} - previously_open
-            if newly_open:
-                sections = None
         if sections is None:
             mode = "details"
-            sections = []
-            for row in rows:
-                identity = {key: row[key] for key in ("section", "component", "class_number")}
-                html = self.action(row["action"])
-                detail = parse_detail(html, identity)
-                detail["search_structure"] = row["search_structure"]
-                sections.append(detail)
-                self.action("CLASS_SRCH_WRK2_SSR_PB_BACK")
-            bundles, issues = build_bundles(sections)
+            sections = [self.read_detail(row) for row in rows]
             counts_validated = all(
-                all(
-                    detail[key] == row[key]
-                    for key in ("status", "capacity", "enrolled", "available_seats")
-                )
-                for row, detail in zip(rows, sections, strict=True)
+                self.counts_match(row, detail) for row, detail in zip(rows, sections, strict=True)
             )
             validated_at = datetime.now(UTC).isoformat()
         else:
-            counts_validated = True
+            previously_open = {b["key"] for b in self.cached_snapshot["bundles"] if b["open"]}
+            sections, confirmed = self.confirm_openings(rows, sections, previously_open)
+            if confirmed:
+                mode = "confirm"
+            by_number = {section["class_number"]: section for section in sections}
+            counts_validated = all(
+                self.counts_match(row, by_number[row["class_number"]])
+                for row in rows
+                if row["class_number"] in confirmed
+            )
             validated_at = self.cached_snapshot["details_validated_at"]
+        bundles, issues = build_bundles(sections)
         self.search_ready = True
         return {
             "collection_mode": mode,
