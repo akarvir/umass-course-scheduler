@@ -22,14 +22,25 @@ class FixtureClient(SpireClient):
     def start(self):
         self.request_count += 2
         self.soup = BeautifulSoup(
+            '<form id="CLASS_SEARCH"><input name="ICStateNum" value="1">'
             '<select id="UM_DERIVED_SA_UM_TERM_DESCR">'
-            '<option value="2267">2026 Fall</option></select>',
+            '<option value="2267">2026 Fall</option></select></form>',
             "html.parser",
         )
 
     def action(self, action, **kwargs):
         self.request_count += 1
         self.actions.append(action)
+        if action == "CLASS_SRCH_WRK2_SSR_PB_NEW_SEARCH":
+            if getattr(self, "expire_reuse", False):
+                self.soup = BeautifulSoup("<html>Session expired</html>", "html.parser")
+            else:
+                self.soup = BeautifulSoup(
+                    '<form id="CLASS_SEARCH"><input name="ICStateNum" value="2">'
+                    '<select id="UM_DERIVED_SA_UM_TERM_DESCR">'
+                    '<option value="2267">2026 Fall</option></select></form>',
+                    "html.parser",
+                )
         if action == "CLASS_SRCH_WRK2_SSR_PB_CLASS_SRCH":
             self.soup = BeautifulSoup(self.search, "html.parser")
         if action.startswith("DERIVED_CLSRCH_SSR_CLASSNAME_LONG$"):
@@ -193,3 +204,33 @@ def test_redirect_outside_spire_is_rejected_before_request(monkeypatch):
         with pytest.raises(SourceError, match="redirect host"):
             client.request("GET", "https://www.spire.umass.edu/first")
         assert len(visited) == 1
+
+
+def test_guest_session_reused_and_request_counter_is_per_check():
+    with FixtureClient() as client:
+        first = client.collect("2026 Fall", "COMPSCI", "220")
+        assert client.request_count == 7
+        client.cached_snapshot = first
+        repeated = client.collect("2026 Fall", "COMPSCI", "220")
+        assert repeated["collection_mode"] == "search"
+        assert client.request_count == 2
+        assert client.actions.count("CLASS_SRCH_WRK2_SSR_PB_NEW_SEARCH") == 1
+
+
+def test_expired_guest_session_recovers_without_using_old_results():
+    with FixtureClient() as client:
+        first = client.collect("2026 Fall", "COMPSCI", "220")
+        client.cached_snapshot = first
+        client.expire_reuse = True
+        result = client.collect("2026 Fall", "COMPSCI", "220")
+        assert result["collection_mode"] == "search"
+        assert client.request_count == 4
+        assert result["sections"] == first["sections"]
+
+
+def test_reused_session_rejects_wrong_course_results():
+    with FixtureClient() as client:
+        client.collect("2026 Fall", "COMPSCI", "220")
+        with pytest.raises(SourceError, match="course identity"):
+            client.collect("2026 Fall", "COMPSCI", "250")
+        assert not client.search_ready

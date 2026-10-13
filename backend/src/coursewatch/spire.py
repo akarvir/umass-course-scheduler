@@ -191,23 +191,30 @@ def fast_sections(rows, cached, term, subject, catalog_number):
 
 class SpireClient:
     def __init__(self):
-        self.client = httpx.Client(
-            follow_redirects=True,
-            timeout=40,
-            headers={"User-Agent": "UMassCourseWatch/0.1"},
-            event_hooks={"request": [self.before_http_request]},
-        )
+        self.client = self.new_http_client()
         self.soup = None
         self.last_request = 0.0
         self.request_count = 0
         self.before_request = None
         self.cached_snapshot = None
+        self.search_ready = False
+
+    def new_http_client(self):
+        return httpx.Client(
+            follow_redirects=True,
+            timeout=40,
+            headers={"User-Agent": "UMassCourseWatch/0.1"},
+            event_hooks={"request": [self.before_http_request]},
+        )
 
     def __enter__(self):
         return self
 
-    def __exit__(self, *args):
+    def close(self):
         self.client.close()
+
+    def __exit__(self, *args):
+        self.close()
 
     def request(self, method, url, **kwargs):
         if urlparse(url).hostname != urlparse(BASE).hostname:
@@ -249,8 +256,23 @@ class SpireClient:
         data["ICAction"] = action
         return self.request("POST", urljoin(BASE, url), data=data)
 
-    def collect(self, term, subject, catalog_number):
+    def prepare_search(self):
+        if self.search_ready:
+            self.search_ready = False
+            try:
+                self.action("CLASS_SRCH_WRK2_SSR_PB_NEW_SEARCH")
+                form_data(self.soup)
+                if not self.soup.find("select", id="UM_DERIVED_SA_UM_TERM_DESCR"):
+                    raise SourceError("SPIRE search form missing after session reuse")
+                return
+            except (SourceError, httpx.HTTPError):
+                self.close()
+                self.client = self.new_http_client()
         self.start()
+
+    def collect(self, term, subject, catalog_number):
+        self.request_count = 0
+        self.prepare_search()
         select = self.soup.find("select", id="UM_DERIVED_SA_UM_TERM_DESCR")
         if not select:
             raise SourceError("SPIRE term selector missing")
@@ -310,6 +332,7 @@ class SpireClient:
         else:
             counts_validated = True
             validated_at = self.cached_snapshot["details_validated_at"]
+        self.search_ready = True
         return {
             "collection_mode": mode,
             "details_validated_at": validated_at,

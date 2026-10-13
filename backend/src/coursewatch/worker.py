@@ -5,6 +5,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+from functools import lru_cache
 
 import httpx
 from sqlalchemy import delete, func, select, text
@@ -26,10 +27,16 @@ from coursewatch.models import (
 from coursewatch.notifications import CourseAvailabilityEvent, CourseOpeningPublisher
 from coursewatch.polling import next_due, wait_for_request
 from coursewatch.spire import CourseUnavailable, SpireClient, TermUnavailable
+from coursewatch.spire_pool import SpireSessionPool
 
 log = logging.getLogger(__name__)
 WORKER_LOCK = 731920271
 stop = threading.Event()
+
+
+@lru_cache
+def session_pool():
+    return SpireSessionPool(settings().poll_concurrency, client_factory=SpireClient)
 
 
 def observe(db: Session, course: Course, snapshot: dict):
@@ -159,7 +166,7 @@ def poll_one(_=None):
                     raise TermUnavailable(
                         f"{claim.term} is not published in SPIRE guest search yet"
                     )
-            with SpireClient() as client:
+            with session_pool().acquire() as client:
                 client.before_request = lambda: wait_for_request(
                     engine(), lambda: stop.is_set() or heartbeat.lost.is_set()
                 )
