@@ -70,7 +70,7 @@ def test_repeat_check_uses_search_only_without_mutating_cache():
     initial, requests = collect()
     original = deepcopy(initial)
     result, fast_requests = collect(cached=initial)
-    assert requests == 9 and fast_requests == 5
+    assert requests == 7 and fast_requests == 3
     assert initial["search_counts_validated"] and result["collection_mode"] == "search"
     assert result["sections"] == initial["sections"] and initial == original
     assert result["details_validated_at"] == initial["details_validated_at"]
@@ -82,7 +82,7 @@ def test_new_opening_is_confirmed_with_detail_counts():
     soup.find(id="UM_DERIVED_SR_ENRL_TOT$1").string = "34"
     soup.find(id="win0divDERIVED_CLSRCH_SSR_STATUS_LONG$1").find("img")["alt"] = "Open"
     result, requests = collect(str(soup), cached=initial, seat_mismatch=True)
-    assert result["collection_mode"] == "details" and requests == 9
+    assert result["collection_mode"] == "details" and requests == 7
     assert not result["search_counts_validated"]
     assert not any(b["open"] for b in result["bundles"])
 
@@ -91,7 +91,7 @@ def test_expired_details_require_refresh():
     initial, _ = collect()
     initial["details_validated_at"] = (now() - timedelta(hours=2)).isoformat()
     result, requests = collect(cached=initial)
-    assert result["collection_mode"] == "details" and requests == 9
+    assert result["collection_mode"] == "details" and requests == 7
 
 
 @pytest.mark.parametrize("change", ["session", "schedule", "capacity", "section"])
@@ -107,7 +107,7 @@ def test_changed_structure_requires_details(change):
     else:
         soup.find(id="DERIVED_CLSRCH_SSR_CLASSNAME_LONG$0").string = "03-LEC(12073)"
     result, requests = collect(str(soup), cached=initial)
-    assert result["collection_mode"] == "details" and requests == 9
+    assert result["collection_mode"] == "details" and requests == 7
 
 
 def test_new_removed_or_wrong_course_cache_is_not_reused():
@@ -122,7 +122,7 @@ def test_detail_counts_that_disagree_disable_fast_path():
     initial, _ = collect(seat_mismatch=True)
     assert not initial["search_counts_validated"]
     result, requests = collect(cached=initial)
-    assert result["collection_mode"] == "details" and requests == 9
+    assert result["collection_mode"] == "details" and requests == 7
 
 
 @pytest.mark.parametrize(

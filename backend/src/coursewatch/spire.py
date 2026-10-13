@@ -259,11 +259,11 @@ class SpireClient:
         )
         if not option:
             raise TermUnavailable(f"{term} is not published in SPIRE guest search yet")
-        self.action("UM_DERIVED_SA_UM_TERM_DESCR", UM_DERIVED_SA_UM_TERM_DESCR=option["value"])
-        self.action("CLASS_SRCH_WRK2_SUBJECT$108$", **{"CLASS_SRCH_WRK2_SUBJECT$108$": subject})
         self.action(
             "CLASS_SRCH_WRK2_SSR_PB_CLASS_SRCH",
             **{
+                "UM_DERIVED_SA_UM_TERM_DESCR": option["value"],
+                "CLASS_SRCH_WRK2_SUBJECT$108$": subject,
                 "CLASS_SRCH_WRK2_CATALOG_NBR$8$": catalog_number,
                 "CLASS_SRCH_WRK2_SSR_EXACT_MATCH1": "E",
                 "CLASS_SRCH_WRK2_SSR_OPEN_ONLY$chk": "N",
