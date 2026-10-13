@@ -108,7 +108,7 @@ export default function Home() {
     </header>
     <main>
       <div className="intro"><p className="eyebrow"><span className="dot" /> SPRING 2027 · COMPUTER SCIENCE</p>
-        <h1>A seat opens.<br /><span>You hear about it.</span></h1>
+        <h1>Full class?<br /><span>Get the heads-up.</span></h1>
         <p className="lede">Keep an eye on the classes you need. Get an email when a lecture and its related sections have room.</p>
       </div>
       {error && <div className="notice error" role="alert">{error}</div>}
